@@ -12,10 +12,13 @@ from sklearn.ensemble import RandomForestClassifier
 from sklearn.tree import DecisionTreeClassifier
 from sklearn.neighbors import KNeighborsClassifier
 from sklearn.linear_model import LogisticRegression
-from sklearn.svm import SVC
-from sklearn.metrics import accuracy_score
+from sklearn.svm import LinearSVC
+from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
 from xgboost import XGBClassifier
 from sklearn.preprocessing import LabelEncoder
+import time
+import matplotlib.pyplot as plt
+from sklearn.model_selection import learning_curve
 
 MODEL_FILE = "model.pkl"
 PIPELINE_FILE = "pipeline.pkl"
@@ -31,13 +34,20 @@ num_pipeline = Pipeline([
 
 if not os.path.exists(MODEL_FILE):
     print("Files do not exists")
-    dataframe = pd.read_csv("UNSW_NB15_training-set.csv")
+    dataframe = pd.read_csv("UNSW_dataset.csv",low_memory=False)
     
-    sample_size = 1  
+    sample_size = 0.1  
     dataframe_sample = dataframe.sample(frac=sample_size, random_state=42)
     dataframe_sample.drop("label", axis=1, inplace=True, errors="ignore")
+    dataframe_sample.drop("srcip", axis=1, inplace=True, errors="ignore")
+    dataframe_sample.drop("dstip", axis=1, inplace=True, errors="ignore")
   
     dataframe_sample["service"] = dataframe_sample["service"].replace("-", "none")
+    dataframe_sample["attack_cat"] = dataframe_sample["attack_cat"].fillna("normal")
+    dataframe_sample["ct_flw_http_mthd"] = dataframe_sample["ct_flw_http_mthd"].fillna(0)
+    dataframe_sample["is_ftp_login"] = dataframe_sample["is_ftp_login"].fillna(0)
+
+    print(dataframe_sample["attack_cat"].value_counts())
     X = dataframe_sample.drop("attack_cat", axis=1)
     y = dataframe_sample["attack_cat"]
 
@@ -63,21 +73,14 @@ if not os.path.exists(MODEL_FILE):
     y_train_enc = le.fit_transform(y_train)
     y_test_enc = le.transform(y_test)
     models = {
-        "KNN": KNeighborsClassifier(n_neighbors=5),
-        "Decision Tree": DecisionTreeClassifier(random_state=42,max_depth=10),
-        "Logistic Regression": LogisticRegression(max_iter=500, random_state=42),
-        "SVM": SVC(kernel='rbf', probability=True, random_state=42),
-        "RandomForest":RandomForestClassifier(n_estimators=100,min_samples_leaf=2,min_samples_split=10,max_features=None,max_depth=20,random_state=42),
-        "XGBoost": XGBClassifier(
-        n_estimators=250,
-        max_depth=16,
-        learning_rate=0.05,
-        subsample=0.8,
-        colsample_bytree=0.8,
-        eval_metric="mlogloss",
-        random_state=42,
-        )
-            }
+    "KNN": KNeighborsClassifier(n_neighbors=5),
+    "Decision Tree": DecisionTreeClassifier( max_depth=10, random_state=42),
+    "Logistic Regression": LogisticRegression(C=0.5908,solver='lbfgs',max_iter=500,random_state=42    ),
+    "SVM": LinearSVC(C=0.3058, random_state=42),
+    "RandomForest": RandomForestClassifier(n_estimators=100,max_depth=None,min_samples_leaf=2,max_features='sqrt',random_state=42),
+    "XGBoost": XGBClassifier(n_estimators=100,max_depth=6,learning_rate=0.05,subsample=0.6,colsample_bytree=1.0,eval_metric="mlogloss",random_state=42)
+    }
+
     trained_models = {}
     results = {}
     for model_name, model in models.items():
@@ -86,27 +89,70 @@ if not os.path.exists(MODEL_FILE):
                     ("preprocess", preprocessor),
                     ("model", model)
                         ])
+        start_time = time.perf_counter()
         if model_name == "XGBoost":
             fullPipeline.fit(X_train, y_train_enc)
-            y_pred = fullPipeline.predict(X_test)
-            y_pred = le.inverse_transform(y_pred)
-            acc = accuracy_score(y_test, y_pred)
         else:
             fullPipeline.fit(X_train, y_train)
-            y_pred = fullPipeline.predict(X_test)
-            acc = accuracy_score(y_test, y_pred)
+        train_time = time.perf_counter() - start_time
+
+        y_pred = fullPipeline.predict(X_test)
+        # If predictions are encoded (e.g., XGBoost trained on integers), convert back to original labels
+        if model_name == "XGBoost":
+            y_pred = le.inverse_transform(y_pred)
+
+        # Compute metrics (weighted average for multiclass)
+        acc = accuracy_score(y_test, y_pred)
+        precision = precision_score(y_test, y_pred, average='weighted', zero_division=0)
+        recall = recall_score(y_test, y_pred, average='weighted', zero_division=0)
+        f1 = f1_score(y_test, y_pred, average='weighted', zero_division=0)
+
         trained_models[model_name] = fullPipeline
-        results[model_name] = acc
-        print(f"{model_name} Accuracy: {acc*100:.4f}%")
-    joblib.dump(trained_models,MODEL_FILE)
-    print("Saved all trained models into a pickel")
+        results[model_name] = {
+            "accuracy": acc,
+            "precision": precision,
+            "recall": recall,
+            "f1": f1,
+            "train_time_sec": train_time
+        }
+        print(f"{model_name} -> Time: {train_time:.4f}s | Acc: {acc*100:.4f}% | Precision: {precision*100:.4f}% | Recall: {recall*100:.4f}% | F1: {f1*100:.4f}%")
+    joblib.dump(trained_models, MODEL_FILE)
+    print("Saved all trained models into a pickle")
 else:
-    print("Files already exists")
+    print("Files already exist")
     trained_models = joblib.load(MODEL_FILE)
     X_test, y_test = joblib.load(TEST_DATA_FILE)
     results = {}
     for model_name, pipeline in trained_models.items():
         y_pred = pipeline.predict(X_test)
+        # If predictions appear encoded as integers while y_test are strings, try inverse transforming
+        try:
+            if hasattr(y_pred, "dtype") and y_pred.dtype.kind in 'iu':
+                le = LabelEncoder()
+                le.fit(y_test)
+                y_pred = le.inverse_transform(y_pred)
+            elif len(y_pred) > 0 and isinstance(y_pred[0], (int,)):
+                le = LabelEncoder()
+                le.fit(y_test)
+                y_pred = le.inverse_transform(y_pred)
+        except Exception:
+            pass
+
         acc = accuracy_score(y_test, y_pred)
-        results[model_name] = acc
-        print(f"{model_name} (loaded) Accuracy: {acc*100:.4f}%")
+        precision = precision_score(y_test, y_pred, average='weighted', zero_division=0)
+        recall = recall_score(y_test, y_pred, average='weighted', zero_division=0)
+        f1 = f1_score(y_test, y_pred, average='weighted', zero_division=0)
+
+        results[model_name] = {
+            "accuracy": acc,
+            "precision": precision,
+            "recall": recall,
+            "f1": f1,
+            "train_time_sec": None
+        }
+        print(f"{model_name} (loaded) -> Time: N/A | Acc: {acc*100:.4f}% | Precision: {precision*100:.4f}% | Recall: {recall*100:.4f}% | F1: {f1*100:.4f}%")
+
+
+
+
+
