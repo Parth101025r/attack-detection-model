@@ -4,6 +4,7 @@ import joblib
 import pickle
 import os
 
+import matplotlib.pyplot as plt
 from sklearn.model_selection import StratifiedShuffleSplit
 # from sklearn.pipeline import Pipeline
 from sklearn.compose import ColumnTransformer
@@ -18,13 +19,14 @@ from xgboost import XGBClassifier
 from sklearn.preprocessing import LabelEncoder
 import time
 from sklearn.metrics import classification_report
-from imblearn.over_sampling import SMOTE
+from imblearn.combine import SMOTETomek
 from imblearn.pipeline import Pipeline
 from imblearn.under_sampling import RandomUnderSampler
+from sklearn.metrics import confusion_matrix, ConfusionMatrixDisplay
 
-MODEL_FILE = "model.pkl"
-PIPELINE_FILE = "pipeline.pkl"
-TEST_DATA_FILE = "test_data.pkl"
+MODEL_FILE = "model_1.pkl"
+PIPELINE_FILE = "pipeline_1.pkl"
+TEST_DATA_FILE = "test_data_1.pkl"
 
 cat_pipeline = Pipeline([
     ("encoder", OneHotEncoder(handle_unknown='ignore'))
@@ -50,11 +52,11 @@ if not os.path.exists(MODEL_FILE):
 
     # 3. Replace them
     dataframe['attack_cat'] = dataframe['attack_cat'].replace(rare_classes, 'Other')
-    sample_size = 0.01  
+    sample_size = 1 
     dataframe_sample = dataframe.sample(frac=sample_size, random_state=42)
-    dataframe_sample.drop("label", axis=1, inplace=True, errors="ignore")
-    dataframe_sample.drop("srcip", axis=1, inplace=True, errors="ignore")
-    dataframe_sample.drop("dstip", axis=1, inplace=True, errors="ignore")
+
+    redundant_cols = ['dwin', 'Ltime', 'ct_srv_dst', 'ct_dst_src_ltm','label','srcip','dstip','dloss','dbytes','sttl']
+    dataframe_sample.drop(redundant_cols ,axis=1, inplace=True, errors="ignore")
   
     dataframe_sample["service"] = dataframe_sample["service"].replace("-", "none")
     dataframe_sample["attack_cat"] = dataframe_sample["attack_cat"].fillna("normal")
@@ -75,7 +77,6 @@ if not os.path.exists(MODEL_FILE):
                 ])
 
     split = StratifiedShuffleSplit(n_splits=1, test_size=0.2, random_state=42)
-
     for train_index, test_index in split.split(X, y):
         X_train = X.iloc[train_index]
         X_test  = X.iloc[test_index]
@@ -88,10 +89,10 @@ if not os.path.exists(MODEL_FILE):
     y_test_enc = le.transform(y_test)
     models = {
     "KNN": KNeighborsClassifier(n_neighbors=5),
-    "Decision Tree": DecisionTreeClassifier( max_depth=10, random_state=42),
-    "Logistic Regression": LogisticRegression(C=0.5908,solver='lbfgs',max_iter=500,random_state=42    ),
-    "SVM": LinearSVC(C=0.3058, random_state=42),
-    "RandomForest": RandomForestClassifier(n_estimators=100,max_depth=None,min_samples_leaf=2,max_features='sqrt',random_state=42),
+    "Decision Tree": DecisionTreeClassifier( max_depth=10, random_state=42,class_weight='balanced'),
+    "Logistic Regression": LogisticRegression(C=0.5908,solver='lbfgs',max_iter=500,random_state=42,class_weight='balanced'    ),
+    "SVM": LinearSVC(C=0.3058, random_state=42,class_weight='balanced'),
+    "RandomForest": RandomForestClassifier(n_estimators=100,max_depth=None,min_samples_leaf=2,max_features='sqrt',random_state=42,class_weight='balanced'),
     "XGBoost": XGBClassifier(n_estimators=100,max_depth=6,learning_rate=0.05,subsample=0.6,colsample_bytree=1.0,eval_metric="mlogloss",random_state=42)
     }
     strategy = {'generic': 500}
@@ -101,8 +102,8 @@ if not os.path.exists(MODEL_FILE):
         print(f"Training {model_name}...")
         fullPipeline = Pipeline([
                     ("preprocess", preprocessor),
-                   ("smote",SMOTE(sampling_strategy="not majority")),
-                    ("RUS",RandomUnderSampler(sampling_strategy="not minority")),
+                   ("smote",SMOTETomek(random_state=42)),
+                    # ("RUS",RandomUnderSampler(sampling_strategy="not minority")),
                     ("model", model)
                         ])
         start_time = time.perf_counter()
