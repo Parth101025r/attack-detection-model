@@ -5,7 +5,7 @@ import pickle
 import os
 
 from sklearn.model_selection import StratifiedShuffleSplit
-from sklearn.pipeline import Pipeline
+# from sklearn.pipeline import Pipeline
 from sklearn.compose import ColumnTransformer
 from sklearn.preprocessing import StandardScaler, OneHotEncoder
 from sklearn.ensemble import RandomForestClassifier
@@ -17,8 +17,10 @@ from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_sc
 from xgboost import XGBClassifier
 from sklearn.preprocessing import LabelEncoder
 import time
-import matplotlib.pyplot as plt
-from sklearn.model_selection import learning_curve
+from sklearn.metrics import classification_report
+from imblearn.over_sampling import SMOTE
+from imblearn.pipeline import Pipeline
+from imblearn.under_sampling import RandomUnderSampler
 
 MODEL_FILE = "model.pkl"
 PIPELINE_FILE = "pipeline.pkl"
@@ -35,8 +37,20 @@ num_pipeline = Pipeline([
 if not os.path.exists(MODEL_FILE):
     print("Files do not exists")
     dataframe = pd.read_csv("UNSW_dataset.csv",low_memory=False)
-    
-    sample_size = 0.1  
+    dataframe['attack_cat'] = dataframe['attack_cat'].str.strip()
+
+    # 2. (Optional) Force everything to lowercase to catch "Fuzzers" vs "fuzzers"
+    dataframe['attack_cat'] = dataframe['attack_cat'].str.lower()
+    # 1. Calculate frequencies
+    series = dataframe['attack_cat'].value_counts(normalize=True)
+
+    # 2. Identify infrequent labels
+    threshold = 0.05
+    rare_classes = series[series < threshold].index
+
+    # 3. Replace them
+    dataframe['attack_cat'] = dataframe['attack_cat'].replace(rare_classes, 'Other')
+    sample_size = 0.01  
     dataframe_sample = dataframe.sample(frac=sample_size, random_state=42)
     dataframe_sample.drop("label", axis=1, inplace=True, errors="ignore")
     dataframe_sample.drop("srcip", axis=1, inplace=True, errors="ignore")
@@ -80,13 +94,15 @@ if not os.path.exists(MODEL_FILE):
     "RandomForest": RandomForestClassifier(n_estimators=100,max_depth=None,min_samples_leaf=2,max_features='sqrt',random_state=42),
     "XGBoost": XGBClassifier(n_estimators=100,max_depth=6,learning_rate=0.05,subsample=0.6,colsample_bytree=1.0,eval_metric="mlogloss",random_state=42)
     }
-
+    strategy = {'generic': 500}
     trained_models = {}
     results = {}
     for model_name, model in models.items():
         print(f"Training {model_name}...")
         fullPipeline = Pipeline([
                     ("preprocess", preprocessor),
+                   ("smote",SMOTE(sampling_strategy="not majority")),
+                    ("RUS",RandomUnderSampler(sampling_strategy="not minority")),
                     ("model", model)
                         ])
         start_time = time.perf_counter()
@@ -108,14 +124,17 @@ if not os.path.exists(MODEL_FILE):
         f1 = f1_score(y_test, y_pred, average='weighted', zero_division=0)
 
         trained_models[model_name] = fullPipeline
+        report = classification_report(y_test, y_pred, zero_division=0)
         results[model_name] = {
             "accuracy": acc,
             "precision": precision,
             "recall": recall,
             "f1": f1,
-            "train_time_sec": train_time
+            "train_time_sec": train_time,
+            "classification_report": report
         }
         print(f"{model_name} -> Time: {train_time:.4f}s | Acc: {acc*100:.4f}% | Precision: {precision*100:.4f}% | Recall: {recall*100:.4f}% | F1: {f1*100:.4f}%")
+        print(f"Classification report for {model_name}:\n{report}")
     joblib.dump(trained_models, MODEL_FILE)
     print("Saved all trained models into a pickle")
 else:
@@ -143,14 +162,17 @@ else:
         recall = recall_score(y_test, y_pred, average='weighted', zero_division=0)
         f1 = f1_score(y_test, y_pred, average='weighted', zero_division=0)
 
+        report = classification_report(y_test, y_pred, zero_division=0)
         results[model_name] = {
             "accuracy": acc,
             "precision": precision,
             "recall": recall,
             "f1": f1,
-            "train_time_sec": None
+            "train_time_sec": None,
+            "classification_report": report
         }
         print(f"{model_name} (loaded) -> Time: N/A | Acc: {acc*100:.4f}% | Precision: {precision*100:.4f}% | Recall: {recall*100:.4f}% | F1: {f1*100:.4f}%")
+        print(f"Classification report for {model_name}:\n{report}")
 
 
 
